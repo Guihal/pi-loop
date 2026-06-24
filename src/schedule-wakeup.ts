@@ -71,6 +71,16 @@ export function registerWakeupTool(
         recurring: false,
         durable: false,
         label: `wakeup: ${params.reason}`,
+        // Stamp the owning session so the wakeup only fires in the session
+        // that armed it. Foreign-session filter in scheduler.fire() does
+        // the rest. Tolerate a missing sessionManager in the tool ctx.
+        sessionId: (() => {
+          try {
+            return (_ctx as any)?.sessionManager?.getSessionId?.();
+          } catch {
+            return undefined;
+          }
+        })(),
       };
 
       addTask(task);

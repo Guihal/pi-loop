@@ -84,6 +84,15 @@ export function registerCronTools(
         recurring: params.recurring,
         durable: params.durable,
         label: params.label,
+        // Pin the task to the creating session so it does not fire in a
+        // different active session in the same pi process.
+        sessionId: (() => {
+          try {
+            return (_ctx as any)?.sessionManager?.getSessionId?.();
+          } catch {
+            return undefined;
+          }
+        })(),
       };
 
       addTask(task);
@@ -159,7 +168,19 @@ export function registerCronTools(
     promptSnippet: "cron_list — list all active scheduled tasks",
 
     async execute(_toolCallId, _params, _signal, _onUpdate, _ctx): Promise<Result> {
-      const tasks = getAllTasks();
+      // Filter to tasks visible in the current session. Durable tasks always
+      // show. Tasks without sessionId are legacy and show anywhere.
+      // cron_delete and /loop-kill keep the unfiltered view for admin cleanup.
+      const currentSid = (() => {
+        try {
+          return (_ctx as any)?.sessionManager?.getSessionId?.() ?? null;
+        } catch {
+          return null;
+        }
+      })();
+      const tasks = getAllTasks().filter(
+        (t) => t.durable || !t.sessionId || t.sessionId === currentSid,
+      );
       if (tasks.length === 0) {
         return result("No scheduled tasks.");
       }

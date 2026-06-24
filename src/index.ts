@@ -103,6 +103,7 @@ export default function piLoop(pi: ExtensionAPI): void {
           "call schedule_wakeup to arm the next wake-up. Choose your delay based on " +
           "the task: 60-270s for active work, 1200-1800s for idle monitoring. " +
           "Omit the call to end the loop.]",
+          { deliverAs: "followUp" },
         );
         return;
       }
@@ -135,6 +136,9 @@ export default function piLoop(pi: ExtensionAPI): void {
         createdAt: Date.now(),
         recurring: true,
         durable: false,
+        // Pin the task to the creating session so it does not fire in a
+        // different active session in the same pi process.
+        sessionId: ctx.sessionManager.getSessionId(),
       };
 
       addTask(task);
@@ -155,7 +159,7 @@ export default function piLoop(pi: ExtensionAPI): void {
       }
 
       // Immediately execute the prompt (don't wait for first cron fire)
-      pi.sendUserMessage(parsed.prompt);
+      pi.sendUserMessage(parsed.prompt, { deliverAs: "followUp" });
     },
   });
 
@@ -301,6 +305,15 @@ export default function piLoop(pi: ExtensionAPI): void {
     config = await loadProjectConfig(cwd);
     debug("session_start: config loaded, cwd =", cwd);
 
+    // Prune non-durable tasks from a different session before loading
+    // durable tasks. Tasks without a sessionId are kept (legacy/cross-session).
+    const currentSid = ctx.sessionManager.getSessionId();
+    for (const t of getAllTasks()) {
+      if (!t.durable && t.sessionId && t.sessionId !== currentSid) {
+        removeTask(t.id);
+      }
+    }
+
     // Initialize scheduler
     scheduler = new LoopScheduler(pi, config, cwd);
     scheduler.setContext(ctx);
@@ -337,7 +350,7 @@ export default function piLoop(pi: ExtensionAPI): void {
           }
           
           // Fire immediately if agent is idle (will be idle after session_start)
-          pi.sendUserMessage(missed.prompt);
+          pi.sendUserMessage(missed.prompt, { deliverAs: "followUp" });
         }
       }
     }

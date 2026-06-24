@@ -12,6 +12,10 @@ export const LoopTaskSchema = Type.Object({
   recurring: Type.Boolean(),
   durable: Type.Boolean(),
   label: Type.Optional(Type.String()),
+  // Owning session id. Tasks only fire in the session that created them
+  // (unless durable). Tasks without a sessionId are treated as
+  // cross-session-allowed (legacy compat).
+  sessionId: Type.Optional(Type.String()),
 });
 
 export type LoopTask = Static<typeof LoopTaskSchema>;
