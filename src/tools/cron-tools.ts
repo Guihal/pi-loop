@@ -85,13 +85,19 @@ export function registerCronTools(
         durable: params.durable,
         label: params.label,
         // Pin the task to the creating session so it does not fire in a
-        // different active session in the same pi process.
+        // different active session in the same pi process. Three-tier
+        // fallback for partial-init tool ctx.
         sessionId: (() => {
+          const c: any = _ctx;
           try {
-            return (_ctx as any)?.sessionManager?.getSessionId?.();
-          } catch {
-            return undefined;
-          }
+            const id = c?.sessionManager?.getSessionId?.();
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          try {
+            const id = c?.sessionId;
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          return undefined;
         })(),
       };
 
@@ -171,15 +177,26 @@ export function registerCronTools(
       // Filter to tasks visible in the current session. Durable tasks always
       // show. Tasks without sessionId are legacy and show anywhere.
       // cron_delete and /loop-kill keep the unfiltered view for admin cleanup.
-      const currentSid = (() => {
+      // Three-tier fallback; if no sid is available (session not yet bound),
+      // show all non-durable tasks so the LLM can still see what is there.
+      const currentSid: string | null = (() => {
+        const c: any = _ctx;
         try {
-          return (_ctx as any)?.sessionManager?.getSessionId?.() ?? null;
-        } catch {
-          return null;
-        }
+          const id = c?.sessionManager?.getSessionId?.();
+          if (typeof id === "string" && id) return id;
+        } catch { /* fall through */ }
+        try {
+          const id = c?.sessionId;
+          if (typeof id === "string" && id) return id;
+        } catch { /* fall through */ }
+        try {
+          const id = c?.sessionManager?.sessionId;
+          if (typeof id === "string" && id) return id;
+        } catch { /* fall through */ }
+        return null;
       })();
       const tasks = getAllTasks().filter(
-        (t) => t.durable || !t.sessionId || t.sessionId === currentSid,
+        (t) => t.durable || !t.sessionId || currentSid === null || t.sessionId === currentSid,
       );
       if (tasks.length === 0) {
         return result("No scheduled tasks.");

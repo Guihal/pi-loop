@@ -21,6 +21,7 @@ import {
   getAllTasks,
   getTaskCount,
   generateTaskId,
+  updateTask,
   loadDurableTasks,
   writeDurableTasks,
   acquireLock,
@@ -137,8 +138,24 @@ export default function piLoop(pi: ExtensionAPI): void {
         recurring: true,
         durable: false,
         // Pin the task to the creating session so it does not fire in a
-        // different active session in the same pi process.
-        sessionId: ctx.sessionManager.getSessionId(),
+        // different active session in the same pi process. Three-tier
+        // fallback for partial-init ctx.
+        sessionId: (() => {
+          const c: any = ctx;
+          try {
+            const id = c?.sessionManager?.getSessionId?.();
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          try {
+            const id = c?.sessionId;
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          try {
+            const id = c?.sessionManager?.sessionId;
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          return undefined;
+        })(),
       };
 
       addTask(task);
@@ -305,12 +322,58 @@ export default function piLoop(pi: ExtensionAPI): void {
     config = await loadProjectConfig(cwd);
     debug("session_start: config loaded, cwd =", cwd);
 
-    // Prune non-durable tasks from a different session before loading
-    // durable tasks. Tasks without a sessionId are kept (legacy/cross-session).
-    const currentSid = ctx.sessionManager.getSessionId();
+    // Capture the current session id with a defensive three-tier fallback
+    // (same chain as LoopScheduler.captureSessionId — duplicated here to
+    // avoid exposing the scheduler internals before it is constructed).
+    const currentSid: string | null = (() => {
+      const c: any = ctx;
+      try {
+        const id = c?.sessionManager?.getSessionId?.();
+        if (typeof id === "string" && id) return id;
+      } catch { /* fall through */ }
+      try {
+        const id = c?.sessionId;
+        if (typeof id === "string" && id) return id;
+      } catch { /* fall through */ }
+      try {
+        const id = c?.sessionManager?.sessionId;
+        if (typeof id === "string" && id) return id;
+      } catch { /* fall through */ }
+      return null;
+    })();
+
+    // Reconcile non-durable tasks with the active session:
+    // - reason === "reload": same logical session, new runner. Re-stamp any
+    //   foreign non-durable task with the current sid (a previous stamp was
+    //   a race artifact). Re-stamp legacy/missing-sid tasks too.
+    // - reason in {"new", "resume", "fork", "startup"}: a different session
+    //   is active. Prune non-durable tasks that belong to a previous
+    //   session so they do not fire in the new one. Legacy tasks (no sid)
+    //   are kept.
+    const reason: string | undefined = (_event as any)?.reason;
+    const isReload = reason === "reload";
     for (const t of getAllTasks()) {
-      if (!t.durable && t.sessionId && t.sessionId !== currentSid) {
-        removeTask(t.id);
+      if (t.durable) continue;
+      if (!t.sessionId) {
+        // Legacy or stamp-raced task — bind it to the current session so
+        // it continues to fire here.
+        if (currentSid) {
+          t.sessionId = currentSid;
+          updateTask(t);
+        }
+        continue;
+      }
+      if (t.sessionId !== currentSid) {
+        if (isReload) {
+          // Reload in the same logical session — re-stamp rather than drop.
+          if (currentSid) {
+            t.sessionId = currentSid;
+            updateTask(t);
+          }
+        } else {
+          // New/resume/fork/startup with a different active session — drop.
+          removeTask(t.id);
+        }
       }
     }
 

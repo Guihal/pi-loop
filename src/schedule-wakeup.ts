@@ -73,13 +73,18 @@ export function registerWakeupTool(
         label: `wakeup: ${params.reason}`,
         // Stamp the owning session so the wakeup only fires in the session
         // that armed it. Foreign-session filter in scheduler.fire() does
-        // the rest. Tolerate a missing sessionManager in the tool ctx.
+        // the rest. Three-tier fallback for partial-init tool ctx.
         sessionId: (() => {
+          const c: any = _ctx;
           try {
-            return (_ctx as any)?.sessionManager?.getSessionId?.();
-          } catch {
-            return undefined;
-          }
+            const id = c?.sessionManager?.getSessionId?.();
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          try {
+            const id = c?.sessionId;
+            if (typeof id === "string" && id) return id;
+          } catch { /* fall through */ }
+          return undefined;
         })(),
       };
 

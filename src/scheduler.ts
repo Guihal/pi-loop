@@ -42,16 +42,50 @@ export class LoopScheduler {
 
   setContext(ctx: ExtensionContext): void {
     this.ctx = ctx;
-    // Capture the owning session id lazily; if the ctx or sessionManager is
-    // gone (stale ctx), leave currentSessionId as-is. The disarmed flag is
-    // cleared on a fresh context — a rebuilt scheduler from session_start is
-    // always considered live.
-    try {
-      this.currentSessionId = (ctx as any)?.sessionManager?.getSessionId?.() ?? null;
-      this.disarmed = false;
-    } catch {
-      // ignore — will be filtered as foreign
+    // Three-tier session-id capture. The pi AgentSession exposes
+    // ctx.sessionId (getter on agent-session.js:588) and
+    // ctx.sessionManager.getSessionId() / .sessionId. Try the most specific
+    // first, fall back gracefully. Do NOT clobber a previously-captured good
+    // id with a bad (null) one — a partial-init ctx would otherwise lock us
+    // into currentSessionId=null and silently filter every stamped task.
+    const captured = this.captureSessionId(ctx);
+    if (captured != null) {
+      this.currentSessionId = captured;
     }
+    // Always re-arm on a fresh context — a rebuilt scheduler from
+    // session_start is considered live.
+    this.disarmed = false;
+  }
+
+  /**
+   * Read the session id from the context, tolerating partial initialization.
+   * Returns null if no id is available.
+   */
+  private captureSessionId(ctx: unknown): string | null {
+    if (!ctx) return null;
+    const c = ctx as any;
+    // Tier 1: sessionManager.getSessionId() (most specific, used by cron_tools)
+    try {
+      const id = c?.sessionManager?.getSessionId?.();
+      if (typeof id === "string" && id) return id;
+    } catch {
+      // fall through
+    }
+    // Tier 2: ctx.sessionId (AgentSession getter, agent-session.js:588)
+    try {
+      const id = c?.sessionId;
+      if (typeof id === "string" && id) return id;
+    } catch {
+      // fall through
+    }
+    // Tier 3: sessionManager.sessionId (the field, not the method)
+    try {
+      const id = c?.sessionManager?.sessionId;
+      if (typeof id === "string" && id) return id;
+    } catch {
+      // fall through
+    }
+    return null;
   }
 
   start(): void {
@@ -138,17 +172,19 @@ export class LoopScheduler {
    * Rules:
    * - Durable tasks are intentionally cross-session: always fire.
    * - Tasks without a sessionId stamp are legacy/cross-session-allowed: fire.
-   * - If we have no currentSessionId (ctx unavailable), stamped tasks do NOT
-   *   fire — fail-closed. The disarm() guard at the top of fire() already
-   *   blocks execution when ctx is null; this filter is the strict
-   *   counterpart for the in-between state.
+   * - If currentSessionId is null (session not yet bound) AND the task has
+   *   no own stamp → fire (legacy pass-through).
+   * - If currentSessionId is null but the task has its own sessionId stamp →
+   *   fire anyway (legacy pass-through, fail-open). This avoids the
+   *   "task disappears from cron_list" symptom when setContext runs before
+   *   the SessionManager is fully wired.
    * - Otherwise, fire only if the task's sessionId matches the scheduler's
    *   currentSessionId.
    */
-  private belongsToCurrentSession(task: LoopTask): boolean {
+  belongsToCurrentSession(task: LoopTask): boolean {
     if (task.durable) return true;
     if (!task.sessionId) return true;
-    if (!this.currentSessionId) return false;
+    if (!this.currentSessionId) return true; // fail-open: see method doc
     return task.sessionId === this.currentSessionId;
   }
 
