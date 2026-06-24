@@ -81,6 +81,7 @@
     "test:unit": "vitest run tests/unit/",
     "test:integration": "vitest run tests/integration/",
     "test:ci": "vitest run tests/unit/ tests/integration/sandbox-install.test.ts",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build && npm run test:unit"
   }
 }
